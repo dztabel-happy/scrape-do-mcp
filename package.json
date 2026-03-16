@@ -1,6 +1,6 @@
 {
   "name": "scrape-do-mcp",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "MCP Server for Scrape.do - Web Scraping & Google Search with anti-bot bypass",
   "main": "dist/index.js",
   "bin": {

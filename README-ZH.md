@@ -9,6 +9,13 @@ Scrape.do 网页抓取和 Google 搜索 MCP 服务器 - 支持反机器人保护
 - **scrape_url**: 抓取任意网页并返回 Markdown 格式内容。自动绕过 Cloudflare、WAF、CAPTCHA 和反爬虫保护。支持 JavaScript 渲染页面。
 - **google_search**: 搜索 Google 并返回结构化的 SERP 结果 JSON。包含自然搜索结果、知识图谱、本地商家、新闻、相关问题（People Also Ask）等。
 
+## 可用工具
+
+| 工具 | 描述 |
+|------|------|
+| `scrape_url` | 抓取任意网页并返回 Markdown 格式内容。自动绕过 Cloudflare、WAF、CAPTCHA 和反爬虫保护。支持 JavaScript 渲染页面。 |
+| `google_search` | 搜索 Google 并返回结构化的 SERP 结果 JSON。包含自然搜索结果、知识图谱、本地商家、新闻、相关问题（People Also Ask）、视频结果等。 |
+
 ## 安装
 
 ### 快速安装（推荐）

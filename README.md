@@ -9,6 +9,13 @@ MCP Server for Scrape.do - Web Scraping & Google Search with anti-bot bypass
 - **scrape_url**: Scrape any webpage and return content as Markdown. Automatically bypasses Cloudflare, WAFs, CAPTCHAs, and anti-bot protection. Supports JavaScript-rendered pages.
 - **google_search**: Search Google and return structured SERP results as JSON. Returns organic results, knowledge graph, local businesses, news stories, and more.
 
+## Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `scrape_url` | Scrape any webpage and return content as Markdown. Automatically bypasses Cloudflare, WAFs, CAPTCHAs, and anti-bot protection. Supports JavaScript-rendered pages. |
+| `google_search` | Search Google and return structured SERP results as JSON. Returns organic results, knowledge graph, local businesses, news stories, related questions (People Also Ask), video results, and more. |
+
 ## Installation
 
 ### Quick Install (Recommended)
