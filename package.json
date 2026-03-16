@@ -1,6 +1,6 @@
 {
   "name": "scrape-do-mcp",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "MCP Server for Scrape.do - Web Scraping & Google Search with anti-bot bypass",
   "main": "dist/index.js",
   "bin": {
@@ -19,8 +19,13 @@
     "firecrawl-alternative"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dztabel-happy/scrape-do-mcp.git"
+  },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "engines": {
     "node": ">=18.0.0"
