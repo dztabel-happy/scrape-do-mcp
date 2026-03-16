@@ -9,7 +9,24 @@ MCP Server for Scrape.do - Web Scraping & Google Search with anti-bot bypass
 
 ## Installation
 
-### Claude Code / Claude Desktop
+### Quick Install (Recommended)
+
+Run this command in your terminal:
+
+```bash
+claude mcp add-json scrape-do --scope user '{
+  "type": "stdio",
+  "command": "npx",
+  "args": ["-y", "scrape-do-mcp"],
+  "env": {
+    "SCRAPE_DO_TOKEN": "YOUR_TOKEN_HERE"
+  }
+}'
+```
+
+Replace `YOUR_TOKEN_HERE` with your Scrape.do API token from https://app.scrape.do
+
+### Claude Desktop
 
 Add to your `~/.claude.json`:
 
@@ -33,6 +50,8 @@ Get your free API token at: https://app.scrape.do
 
 ### scrape_url
 
+Scrape any webpage and get content as Markdown.
+
 ```typescript
 // Parameters
 {
@@ -45,6 +64,8 @@ Get your free API token at: https://app.scrape.do
 
 ### google_search
 
+Search Google and get structured results.
+
 ```typescript
 // Parameters
 {
@@ -56,6 +77,53 @@ Get your free API token at: https://app.scrape.do
   device?: "desktop" | "mobile"        // Device type (default: desktop)
 }
 ```
+
+## Example Prompts
+
+Here are some prompts you can use to invoke the tools:
+
+### Scrape a Website
+```
+Please scrape https://github.com and give me the main content as markdown.
+```
+
+### Search Google
+```
+Search Google for "best Python web frameworks 2026" and return the top 5 results.
+```
+
+### Search with Filters
+```
+Search for "AI news" in Chinese, from China, last week.
+```
+
+### JavaScript Rendering
+```
+Scrape this React Single Page Application: https://example-spa.com
+Use render_js=true to get the fully rendered content.
+```
+
+### Get Raw HTML
+```
+Scrape https://example.com and return raw HTML instead of markdown.
+```
+
+## Comparison with Alternatives
+
+| Feature | scrape-do-mcp | Firecrawl | Browserbase |
+|---------|--------------|-----------|-------------|
+| Google Search | ✅ | ❌ | ❌ |
+| Free Credits | 1,000 | 500 | None |
+| Pricing | Pay per use | $19+/mo | $15+/mo |
+| MCP Native | ✅ | ✅ | ❌ |
+| Setup Required | None | API key | API key + browser |
+
+### Why scrape-do-mcp?
+
+- **Zero setup**: Just get a token and use immediately
+- **All-in-one**: Both web scraping AND Google search in one MCP
+- **Anti-bot bypass**: Automatically handles Cloudflare, WAFs, CAPTCHAs
+- **Cost-effective**: Pay only for what you use, free tier available
 
 ## Credit Usage
 
