@@ -2,25 +2,40 @@
 
 [English Docs](./README.md) | 中文文档
 
-Scrape.do 网页抓取和 Google 搜索 MCP 服务器 - 支持反机器人保护
+这是一个把 Scrape.do 官方文档中主要 API 能力封装成 MCP 工具的包：主抓取 API、Google Search API、Amazon Scraper API、Async API，以及 Proxy Mode 配置辅助工具。
 
-## 功能特点
+官方文档：https://scrape.do/documentation/
 
-- **scrape_url**: 抓取任意网页并返回 Markdown 格式内容。自动绕过 Cloudflare、WAF、CAPTCHA 和反爬虫保护。支持 JavaScript 渲染、截图、地理定位（150+ 国家）、设备模拟、会话保持、自定义请求头/Cookie、超时控制等。
-- **google_search**: 搜索 Google 并返回结构化的 SERP 结果 JSON。包含自然搜索结果、知识图谱、本地商家、新闻、相关问题等。支持地理定位和设备筛选。
+## 覆盖范围
 
-## 可用工具
+- `scrape_url`：主 Scrape.do 抓取 API，支持 JS 渲染、地理定位、会话保持、截图、ReturnJSON、浏览器交互、Cookie、Header 转发。
+- `google_search`：结构化 Google 搜索 API，支持 `google_domain`、`location`、`uule`、`lr`、`cr`、`safe`、`nfpr`、`filter`、分页、原始 HTML。
+- `amazon_product`：Amazon PDP 接口。
+- `amazon_offer_listing`：Amazon 卖家报价接口。
+- `amazon_search`：Amazon 搜索 / 类目结果接口。
+- `amazon_raw_html`：Amazon 原始 HTML 接口。
+- `async_create_job`、`async_get_job`、`async_get_task`、`async_list_jobs`、`async_cancel_job`、`async_get_account`：Async API。
+- `proxy_mode_config`：生成 Proxy Mode 的连接信息和参数字符串，不会在工具输出里泄露你的 token。
 
-| 工具 | 描述 |
-|------|------|
-| `scrape_url` | 全功能网页抓取，反机器人绕过。支持：JavaScript 渲染、截图（PNG）、地理定位（150+ 国家）、设备模拟（桌面/手机/平板）、会话保持、自定义请求头/Cookie、超时控制等。 |
-| `google_search` | Google SERP 结构化抓取，返回 JSON。支持：自然搜索结果、知识图谱、本地商家、新闻、People Also Ask、视频结果等，支持地理定位、设备筛选、时间筛选。 |
+## 兼容性说明
+
+- `scrape_url` 同时支持 MCP 友好的别名和官方参数名：
+  - `render_js` 或 `render`
+  - `super_proxy` 或 `super`
+  - `screenshot` 或 `screenShot`
+- `google_search` 同时支持：
+  - `query` 或 `q`
+  - `country` 或 `gl`
+  - `language` 或 `hl`
+  - `domain` 或 `google_domain`
+  - `includeHtml` 或 `include_html`
+- `scrape_url` 里的 Header 转发请使用 `headers` + `header_mode`（`custom` / `extra` / `forward`）。
+- 截图结果会以 MCP 图片内容返回，而不是单纯的 base64 文本。
+- `scrape_url` 在未启用 ReturnJSON 时默认使用 `output="markdown"`，更适合 LLM 读取；如果你想更贴近原始 HTTP API 的行为，请手动设置 `output="raw"`。
 
 ## 安装
 
-### 快速安装（推荐）
-
-在终端中运行以下命令：
+### 快速安装
 
 ```bash
 claude mcp add-json scrape-do --scope user '{
@@ -28,12 +43,10 @@ claude mcp add-json scrape-do --scope user '{
   "command": "npx",
   "args": ["-y", "scrape-do-mcp"],
   "env": {
-    "SCRAPE_DO_TOKEN": "你的Token"
+    "SCRAPE_DO_TOKEN": "YOUR_TOKEN_HERE"
   }
 }'
 ```
-
-将 `你的Token` 替换为你在 https://app.scrape.do 获取的 API Token。
 
 ### Claude Desktop
 
@@ -46,181 +59,57 @@ claude mcp add-json scrape-do --scope user '{
       "command": "npx",
       "args": ["-y", "scrape-do-mcp"],
       "env": {
-        "SCRAPE_DO_TOKEN": "你的Token"
+        "SCRAPE_DO_TOKEN": "YOUR_TOKEN_HERE"
       }
     }
   }
 }
 ```
 
-获取免费 API Token：https://app.scrape.do
+Token 获取地址：https://app.scrape.do
 
-## 使用方法
+## 可用工具
 
-### scrape_url
+| 工具 | 用途 |
+|------|------|
+| `scrape_url` | 主 Scrape.do 抓取 API |
+| `google_search` | 结构化 Google 搜索结果 |
+| `amazon_product` | Amazon PDP 结构化数据 |
+| `amazon_offer_listing` | Amazon 全量卖家报价 |
+| `amazon_search` | Amazon 搜索 / 类目结果 |
+| `amazon_raw_html` | Amazon 原始 HTML |
+| `async_create_job` | 创建 Async API 任务 |
+| `async_get_job` | 查询 Async job 详情 |
+| `async_get_task` | 查询 Async task 详情 |
+| `async_list_jobs` | 列出 Async jobs |
+| `async_cancel_job` | 取消 Async job |
+| `async_get_account` | 查询 Async 账户 / 并发信息 |
+| `proxy_mode_config` | 生成 Proxy Mode 配置 |
 
-抓取任意网页并获取 Markdown 内容。
+## 示例提示词
 
-```typescript
-// 完整参数
-{
-  // 必需
-  url: string,                    // 要抓取的网址
-
-  // 代理和渲染
-  render_js?: boolean,            // 渲染 JavaScript（默认 false）
-  super_proxy?: boolean,           // 使用住宅/移动代理（消耗 10 积分）
-  geoCode?: string,               // 国家代码（如 'us', 'cn', 'gb'）
-  regionalGeoCode?: string,       // 区域（如 'asia', 'europe'）
-  device?: "desktop" | "mobile" | "tablet",  // 设备类型
-  sessionId?: number,             // 保持相同 IP 的会话
-
-  // 超时和重试
-  timeout?: number,               // 最大超时时间（毫秒，默认 60000）
-  retryTimeout?: number,          // 重试超时（毫秒）
-  disableRetry?: boolean,         // 禁用自动重试
-
-  // 输出格式
-  output?: "markdown" | "raw",  // 输出格式（默认 markdown）
-  returnJSON?: boolean,           // 以 JSON 形式返回网络请求
-  transparentResponse?: boolean,   // 返回原始响应
-
-  // 截图
-  screenshot?: boolean,           // 截图（PNG）
-  fullScreenShot?: boolean,      // 全页截图
-  particularScreenShot?: string,  // 元素截图（CSS 选择器）
-
-  // 浏览器控制
-  waitSelector?: string,          // 等待元素（CSS 选择器）
-  customWait?: number,           // 加载后等待时间（毫秒）
-  waitUntil?: "domcontentloaded" | "load" | "networkidle" | "networkidle0" | "networkidle2",
-  width?: number,                // 视口宽度（默认 1920）
-  height?: number,               // 视口高度（默认 1080）
-  blockResources?: boolean,       // 阻止 CSS/图片/字体（默认 true）
-
-  // 请求头和 Cookie
-  customHeaders?: boolean,        // 处理所有请求头
-  extraHeaders?: boolean,       // 添加额外请求头
-  forwardHeaders?: boolean,      // 转发你的请求头
-  setCookies?: string,          // 设置 Cookie（格式：'name=value; name2=value2'）
-  pureCookies?: boolean,        // 返回原始 Cookie
-
-  // 其他
-  disableRedirection?: boolean, // 禁用重定向
-  callback?: string             // Webhook URL 异步接收结果
-}
+```text
+抓取 https://example.com，开启 render=true，并等待 #app 出现。
 ```
 
-### google_search
-
-搜索 Google 并获取结构化结果。
-
-```typescript
-// 完整参数
-{
-  // 必需
-  query: string,                  // 搜索关键词
-
-  // 搜索选项
-  country?: string,                // 国家代码（默认 'us'）
-  language?: string,              // 界面语言（默认 'en'）
-  domain?: string,               // Google 域名（如 'com', 'co.uk'）
-  page?: number,                  // 页码（默认 1）
-  num?: number,                  // 每页结果数（默认 10）
-  time_period?: "" | "last_hour" | "last_day" | "last_week" | "last_month" | "last_year",
-  device?: "desktop" | "mobile", // 设备类型
-
-  // 高级
-  includeHtml?: boolean           // 在响应中包含原始 HTML
-}
+```text
+搜索 "open source MCP servers"，并设置 google_domain=google.co.uk 与 lr=lang_en。
 ```
 
-## 使用示例
-
-### 抓取网页
-```
-请抓取 https://github.com 并给我主要内容（Markdown 格式）。
+```text
+获取 Amazon ASIN B0C7BKZ883 在美国 zipcode=10001 下的 PDP 数据。
 ```
 
-### Google 搜索
+```text
+帮我为这 20 个 URL 创建一个异步抓取任务，并返回 job ID。
 ```
-搜索 "2026 年最佳 Python Web 框架"，返回前 5 个结果。
-```
-
-### 带筛选条件的搜索
-```
-用中文搜索 "AI 新闻"，限定为中国，过去一周的内容。
-```
-
-### JavaScript 渲染
-```
-抓取这个 React 单页应用：https://example-spa.com
-使用 render_js=true 获取完整渲染内容。
-```
-
-### 获取原始 HTML
-```
-抓取 https://example.com 并返回原始 HTML 而不是 markdown。
-```
-
-### 地理定位抓取
-```
-用日本（geoCode: jp）的 IP 抓取 https://www.amazon.com/product/12345
-```
-
-### 移动设备模拟
-```
-用移动设备抓取 https://example.com 来查看移动版页面。
-```
-
-### 截图
-```
-截取 https://example.com 的屏幕截图并返回图片。
-```
-
-### 等待元素加载
-```
-抓取 https://example.com 但先等待 id 为 "content" 的元素加载完成。
-```
-
-### 会话保持
-```
-使用会话 ID 12345 抓取 https://example.com 的多个页面，以保持相同的 IP。
-```
-
-## 与其他工具对比
-
-| 功能 | scrape-do-mcp | Firecrawl | Browserbase |
-|------|--------------|-----------|-------------|
-| Google 搜索 | ✅ | ❌ | ❌ |
-| 免费积分 | 1,000 | 500 | 无 |
-| 价格 | 按量付费 | $19+/月 | $15+/月 |
-| MCP 原生 | ✅ | ✅ | ❌ |
-| 配置难度 | 无需配置 | 需要 API key | 需要 API key + 浏览器 |
-
-### 为什么选择 scrape-do-mcp？
-
-- **零配置**：获取 Token 后即可立即使用
-- **一体化**：网页抓取和 Google 搜索集于一个 MCP
-- **反爬虫绕过**：自动处理 Cloudflare、WAF、CAPTCHA
-- **成本效益**：按需付费，免费额度可用
-
-## 积分消耗
-
-| 工具 | 积分消耗 |
-|------|---------|
-| scrape_url（普通） | 1 积分/次 |
-| scrape_url（super_proxy） | 10 积分/次 |
-| google_search | 1 积分/次 |
-
-**免费：每月 1,000 积分** - 无需信用卡：https://app.scrape.do
 
 ## 开发
 
 ```bash
 npm install
 npm run build
-npm run dev  # 开发模式运行
+npm run dev
 ```
 
 ## 许可证

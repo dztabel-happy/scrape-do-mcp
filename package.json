@@ -1,7 +1,7 @@
 {
   "name": "scrape-do-mcp",
-  "version": "0.2.0",
-  "description": "MCP Server for Scrape.do - Web Scraping & Google Search with anti-bot bypass",
+  "version": "0.3.0",
+  "description": "MCP Server for Scrape.do - scraping, Google Search, Amazon, Async API, and Proxy Mode helpers",
   "main": "dist/index.js",
   "bin": {
     "scrape-do-mcp": "dist/index.js"
@@ -16,6 +16,9 @@
     "scraping",
     "web-scraper",
     "google-search",
+    "amazon-scraper",
+    "async-api",
+    "serp",
     "firecrawl-alternative"
   ],
   "license": "MIT",
@@ -25,6 +28,7 @@
   },
   "files": [
     "dist",
+    "LICENSE",
     "README.md",
     "README-ZH.md"
   ],
