@@ -2,18 +2,15 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import axios from "axios";
-import http from "http";
 
 const SCRAPE_DO_TOKEN = process.env.SCRAPE_DO_TOKEN || "";
 const SCRAPE_API_BASE = "https://api.scrape.do";
-const HTTP_PORT = process.env.PORT || process.env.HTTP_PORT || 3000;
 
 const server = new McpServer({
   name: "scrape-do-mcp",
-  version: "0.1.1",
+  version: "0.1.3",
 });
 
 // ─── Tool 1: scrape_url ──────────────────────────────────────────────────────
@@ -114,57 +111,8 @@ server.tool(
 // ─── Start Server ────────────────────────────────────────────────────────────
 
 async function main() {
-  const transportMode = process.env.TRANSPORT || "stdio";
-
-  if (transportMode === "http" || transportMode === "streamable-http") {
-    console.error(`Starting Streamable HTTP server on port ${HTTP_PORT}...`);
-
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => Math.random().toString(36).substring(2, 15),
-    });
-
-    await server.connect(transport);
-
-    const serverInstance = http.createServer();
-
-    serverInstance.on("request", async (req, res) => {
-      // Handle CORS
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-      if (req.method === "OPTIONS") {
-        res.writeHead(204);
-        res.end();
-        return;
-      }
-
-      // Health check
-      if (req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", name: "scrape-do-mcp", version: "0.1.1" }));
-        return;
-      }
-
-      // MCP endpoint
-      if (req.url === "/" || req.url?.startsWith("/mcp")) {
-        await transport.handleRequest(req, res);
-        return;
-      }
-
-      res.writeHead(404);
-      res.end("Not found");
-    });
-
-    serverInstance.listen(parseInt(String(HTTP_PORT), 10), () => {
-      console.error(`MCP server running on http://localhost:${HTTP_PORT}`);
-    });
-  } else {
-    // Default to stdio mode
-    console.error("Starting STDIO server...");
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-  }
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
 }
 
 main().catch(console.error);

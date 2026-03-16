@@ -29,25 +29,6 @@ Add to your `~/.claude.json`:
 
 Get your free API token at: https://app.scrape.do
 
-### Smithery.ai
-
-Published on [Smithery.ai](https://smithery.ai) - Search for "scrape-do" to install.
-
-### HTTP Server Mode
-
-The server supports both STDIO and HTTP modes:
-
-- **STDIO mode** (default): For local Claude Code / Claude Desktop usage
-- **HTTP mode**: For Smithery托管或 custom HTTP deployment
-
-```bash
-# HTTP mode
-TRANSPORT=http PORT=3000 SCRAPE_DO_TOKEN=your_token npm start
-
-# Health check
-curl http://localhost:3000/health
-```
-
 ## Usage
 
 ### scrape_url
