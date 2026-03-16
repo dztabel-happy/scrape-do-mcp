@@ -8,7 +8,7 @@ const axios_1 = __importDefault(require("axios"));
 const mcp_js_1 = require("@modelcontextprotocol/sdk/server/mcp.js");
 const stdio_js_1 = require("@modelcontextprotocol/sdk/server/stdio.js");
 const zod_1 = require("zod");
-const SERVER_VERSION = "0.3.0";
+const SERVER_VERSION = "0.4.0";
 const SCRAPE_DO_TOKEN = process.env.SCRAPE_DO_TOKEN || "";
 const SCRAPE_API_BASE = "https://api.scrape.do";
 const ASYNC_API_BASE = "https://q.scrape.do";
@@ -70,18 +70,29 @@ function createTextResult(text, structuredContent) {
         ...(structuredContent ? { structuredContent } : {}),
     };
 }
-function createJsonResult(value) {
+function createJsonResult(value, options) {
+    const rawText = options?.rawText ?? JSON.stringify(value, null, 2);
+    const responseMetadata = options?.response ? createResponseMetadata(options.response) : undefined;
     if (isRecord(value)) {
         return {
-            content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
-            structuredContent: value,
+            content: [{ type: "text", text: rawText }],
+            structuredContent: responseMetadata ? { ...value, ...responseMetadata } : value,
         };
     }
-    return createTextResult(JSON.stringify(value, null, 2));
+    if (Array.isArray(value) && responseMetadata) {
+        return createTextResult(rawText, {
+            ...responseMetadata,
+            _responseBody: value,
+        });
+    }
+    return createTextResult(rawText);
 }
-function createImageResult(images, note) {
+function createImageResult(images, note, structuredContent, rawText) {
     const content = [];
-    if (note) {
+    if (rawText) {
+        content.push({ type: "text", text: rawText });
+    }
+    else if (note) {
         content.push({ type: "text", text: note });
     }
     for (const image of images) {
@@ -91,7 +102,10 @@ function createImageResult(images, note) {
             mimeType: image.mimeType,
         });
     }
-    return { content };
+    return {
+        content,
+        ...(structuredContent ? { structuredContent } : {}),
+    };
 }
 function getErrorMessage(error) {
     if (axios_1.default.isAxiosError(error)) {
@@ -106,15 +120,67 @@ function getErrorMessage(error) {
     }
     return String(error);
 }
-async function requestText(config) {
+function getMimeType(contentType) {
+    return contentType?.split(";")[0]?.trim().toLowerCase();
+}
+function isTextLikeMimeType(mimeType) {
+    if (!mimeType) {
+        return true;
+    }
+    return mimeType.startsWith("text/") || mimeType.includes("json") || mimeType.includes("xml") || mimeType === "application/javascript" || mimeType === "application/x-javascript" || mimeType === "application/xhtml+xml";
+}
+function normalizeResponseHeaders(headers) {
+    const entries = Object.entries(headers).filter(([, value]) => value !== undefined);
+    if (entries.length === 0) {
+        return undefined;
+    }
+    return Object.fromEntries(entries.map(([key, value]) => [key, Array.isArray(value) && value.length === 1 ? value[0] : value]));
+}
+function createResponseMetadata(response) {
+    return compactObject({
+        _contentType: response.contentType,
+        _responseHeaders: normalizeResponseHeaders(response.headers),
+        _statusCode: response.statusCode,
+    });
+}
+function createBinaryResult(response) {
+    const mimeType = getMimeType(response.contentType) ?? "application/octet-stream";
+    if (mimeType.startsWith("image/")) {
+        return {
+            content: [
+                { type: "image", data: response.data.toString("base64"), mimeType },
+            ],
+            structuredContent: createResponseMetadata(response),
+        };
+    }
+    return createTextResult(`Binary response returned with content-type ${mimeType}. See structuredContent._bodyBase64 for the raw bytes.`, {
+        ...createResponseMetadata(response),
+        _bodyBase64: response.data.toString("base64"),
+    });
+}
+function createTextBodyResult(text, response) {
+    if (!response) {
+        return createTextResult(text);
+    }
+    return createTextResult(text, createResponseMetadata(response));
+}
+async function requestResponse(config, options) {
     const response = await axios_1.default.request({
         ...config,
-        responseType: "text",
+        responseType: "arraybuffer",
         transformResponse: [(value) => value],
+        validateStatus: options?.acceptAnyStatus ? () => true : undefined,
     });
+    const data = Buffer.isBuffer(response.data) ? response.data : Buffer.from(response.data);
+    const headers = response.headers;
+    const contentTypeHeader = headers["content-type"];
+    const contentType = Array.isArray(contentTypeHeader) ? contentTypeHeader[0] : contentTypeHeader;
     return {
-        text: stringifyUnknown(response.data),
-        headers: response.headers,
+        contentType,
+        data,
+        headers,
+        statusCode: response.status,
+        text: data.toString("utf8"),
     };
 }
 function normalizeHeaderRecord(value) {
@@ -214,7 +280,7 @@ function collectImageMatches(value, results = [], seen = new Set()) {
     if (!isRecord(value)) {
         return results;
     }
-    const prioritizedKeys = ["screenShot", "screenshot", "fullScreenShot", "particularScreenShot", "image", "images"];
+    const prioritizedKeys = ["screenShot", "screenShots", "screenshot", "fullScreenShot", "particularScreenShot", "image", "images"];
     for (const key of prioritizedKeys) {
         if (key in value) {
             collectImageMatches(value[key], results, seen);
@@ -237,6 +303,48 @@ function buildProxyParameterString(params) {
     }
     return searchParams.toString();
 }
+const asyncRenderSchema = zod_1.z.object({
+    blockResources: zod_1.z.boolean().optional(),
+    BlockResources: zod_1.z.boolean().optional(),
+    waitUntil: asyncWaitUntilSchema.optional(),
+    WaitUntil: asyncWaitUntilSchema.optional(),
+    customWait: zod_1.z.number().int().min(0).max(35000).optional(),
+    CustomWait: zod_1.z.number().int().min(0).max(35000).optional(),
+    waitSelector: zod_1.z.string().optional(),
+    WaitSelector: zod_1.z.string().optional(),
+    playWithBrowser: zod_1.z.array(browserActionSchema).optional(),
+    PlayWithBrowser: zod_1.z.array(browserActionSchema).optional(),
+    returnJSON: zod_1.z.boolean().optional(),
+    ReturnJSON: zod_1.z.boolean().optional(),
+    showWebsocketRequests: zod_1.z.boolean().optional(),
+    ShowWebsocketRequests: zod_1.z.boolean().optional(),
+    showFrames: zod_1.z.boolean().optional(),
+    ShowFrames: zod_1.z.boolean().optional(),
+    screenshot: zod_1.z.boolean().optional(),
+    Screenshot: zod_1.z.boolean().optional(),
+    fullScreenshot: zod_1.z.boolean().optional(),
+    FullScreenshot: zod_1.z.boolean().optional(),
+    particularScreenshot: zod_1.z.string().optional(),
+    ParticularScreenshot: zod_1.z.string().optional(),
+});
+function normalizeAsyncRenderInput(input) {
+    if (!input) {
+        return undefined;
+    }
+    return compactObject({
+        BlockResources: input.BlockResources ?? input.blockResources,
+        WaitUntil: input.WaitUntil ?? input.waitUntil,
+        CustomWait: input.CustomWait ?? input.customWait,
+        WaitSelector: input.WaitSelector ?? input.waitSelector,
+        PlayWithBrowser: input.PlayWithBrowser ?? input.playWithBrowser,
+        ReturnJSON: input.ReturnJSON ?? input.returnJSON,
+        ShowWebsocketRequests: input.ShowWebsocketRequests ?? input.showWebsocketRequests,
+        ShowFrames: input.ShowFrames ?? input.showFrames,
+        Screenshot: input.Screenshot ?? input.screenshot,
+        FullScreenshot: input.FullScreenshot ?? input.fullScreenshot,
+        ParticularScreenshot: input.ParticularScreenshot ?? input.particularScreenshot,
+    });
+}
 function ensureToken() {
     if (!SCRAPE_DO_TOKEN) {
         throw new Error("SCRAPE_DO_TOKEN is not set. Get your token at https://app.scrape.do");
@@ -255,7 +363,7 @@ server.tool("scrape_url", "Scrape a webpage with the official Scrape.do API. Sup
     timeout: zod_1.z.number().int().positive().optional().default(60000).describe("Maximum timeout in milliseconds."),
     retryTimeout: zod_1.z.number().int().positive().optional().describe("Retry timeout in milliseconds."),
     disableRetry: zod_1.z.boolean().optional().default(false).describe("Disable automatic retries."),
-    output: zod_1.z.enum(["markdown", "raw"]).optional().describe("Output format. MCP defaults to markdown unless ReturnJSON is used."),
+    output: zod_1.z.enum(["markdown", "raw"]).optional().describe("Output format. Matches Scrape.do's official raw/markdown output."),
     returnJSON: zod_1.z.boolean().optional().default(false).describe("Return JSON with network requests/content."),
     transparentResponse: zod_1.z.boolean().optional().default(false).describe("Return the target response without Scrape.do post-processing."),
     screenshot: zod_1.z.boolean().optional().describe("Alias for screenShot. Capture a viewport screenshot."),
@@ -297,7 +405,7 @@ server.tool("scrape_url", "Scrape a webpage with the official Scrape.do API. Sup
         const effectiveRender = (params.render_js ?? params.render ?? false) || params.returnJSON || params.showFrames || params.showWebsocketRequests || screenshotRequested || interactionRequested;
         const effectiveReturnJSON = params.returnJSON || params.showFrames || params.showWebsocketRequests || screenshotRequested || interactionRequested;
         const effectiveBlockResources = screenshotRequested || interactionRequested ? false : params.blockResources;
-        const effectiveOutput = effectiveReturnJSON ? params.output : params.output ?? "markdown";
+        const effectiveOutput = effectiveReturnJSON ? params.output : params.output ?? "raw";
         const requestParams = compactObject({
             token: SCRAPE_DO_TOKEN,
             url: params.url,
@@ -334,23 +442,32 @@ server.tool("scrape_url", "Scrape a webpage with the official Scrape.do API. Sup
             callback: params.callback,
         });
         const headers = buildForwardedHeaders(params.headers, headerMode);
-        const { text } = await requestText({
+        const response = await requestResponse({
             method: "GET",
             url: SCRAPE_API_BASE,
             params: requestParams,
             headers,
             timeout: Math.min(params.timeout ?? 60000, 120000),
-        });
-        const parsed = tryParseJson(text);
-        const images = screenshotRequested || interactionRequested ? collectImageMatches(parsed ?? text) : [];
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400 && !params.transparentResponse) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
+        }
+        const responseMimeType = getMimeType(response.contentType);
+        const parsed = isTextLikeMimeType(responseMimeType) ? tryParseJson(response.text) : undefined;
+        const images = screenshotRequested || interactionRequested ? collectImageMatches(parsed ?? response.text) : [];
         if (images.length > 0) {
-            const note = images.length === 1 ? "Captured screenshot from Scrape.do." : `Captured ${images.length} screenshots from Scrape.do.`;
-            return createImageResult(images, note);
+            const structuredContent = parsed && isRecord(parsed)
+                ? { ...parsed, ...createResponseMetadata(response) }
+                : createResponseMetadata(response);
+            return createImageResult(images, undefined, structuredContent, parsed ? response.text : undefined);
         }
         if (parsed !== undefined) {
-            return createJsonResult(parsed);
+            return createJsonResult(parsed, { rawText: response.text, response });
         }
-        return createTextResult(text);
+        if (isTextLikeMimeType(responseMimeType)) {
+            return createTextBodyResult(response.text, response);
+        }
+        return createBinaryResult(response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
@@ -406,17 +523,20 @@ server.tool("google_search", "Search Google with Scrape.do's structured SERP API
             nfpr: params.nfpr,
             filter: params.filter,
         });
-        const { text } = await requestText({
+        const response = await requestResponse({
             method: "GET",
             url: `${SCRAPE_API_BASE}/plugin/google/search`,
             params: requestParams,
             timeout: 60000,
-        });
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined) {
-            return createJsonResult(parsed);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
         }
-        return createTextResult(text);
+        const parsed = tryParseJson(response.text);
+        if (parsed !== undefined) {
+            return createJsonResult(parsed, { rawText: response.text, response });
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
@@ -443,17 +563,20 @@ server.tool("amazon_product", "Get structured Amazon product detail data with th
             language: params.language,
             include_html: params.include_html ?? params.includeHtml ? true : undefined,
         });
-        const { text } = await requestText({
+        const response = await requestResponse({
             method: "GET",
             url: `${SCRAPE_API_BASE}/plugin/amazon/pdp`,
             params: requestParams,
             timeout: 60000,
-        });
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined) {
-            return createJsonResult(parsed);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
         }
-        return createTextResult(text);
+        const parsed = tryParseJson(response.text);
+        if (parsed !== undefined) {
+            return createJsonResult(parsed, { rawText: response.text, response });
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
@@ -478,17 +601,20 @@ server.tool("amazon_offer_listing", "Get all seller offers for an Amazon product
             super: params.super_proxy ?? params.super,
             include_html: params.include_html ?? params.includeHtml ? true : undefined,
         });
-        const { text } = await requestText({
+        const response = await requestResponse({
             method: "GET",
             url: `${SCRAPE_API_BASE}/plugin/amazon/offer-listing`,
             params: requestParams,
             timeout: 60000,
-        });
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined) {
-            return createJsonResult(parsed);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
         }
-        return createTextResult(text);
+        const parsed = tryParseJson(response.text);
+        if (parsed !== undefined) {
+            return createJsonResult(parsed, { rawText: response.text, response });
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
@@ -517,17 +643,20 @@ server.tool("amazon_search", "Search Amazon or scrape Amazon category-style resu
             language: params.language,
             include_html: params.include_html ?? params.includeHtml ? true : undefined,
         });
-        const { text } = await requestText({
+        const response = await requestResponse({
             method: "GET",
             url: `${SCRAPE_API_BASE}/plugin/amazon/search`,
             params: requestParams,
             timeout: 60000,
-        });
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined) {
-            return createJsonResult(parsed);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
         }
-        return createTextResult(text);
+        const parsed = tryParseJson(response.text);
+        if (parsed !== undefined) {
+            return createJsonResult(parsed, { rawText: response.text, response });
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
@@ -554,95 +683,94 @@ server.tool("amazon_raw_html", "Get raw HTML from any Amazon URL with ZIP-code g
             language: params.language,
             timeout: params.timeout,
         });
-        const { text } = await requestText({
+        const response = await requestResponse({
             method: "GET",
             url: `${SCRAPE_API_BASE}/plugin/amazon/`,
             params: requestParams,
             timeout: params.timeout ?? 60000,
-        });
-        return createTextResult(text);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
 });
 server.tool("async_create_job", "Create a Scrape.do Async API job for batch/background scraping.", {
-    targets: zod_1.z.array(zod_1.z.string().url()).min(1).describe("URLs to scrape."),
-    method: asyncMethodSchema.optional().default("GET").describe("HTTP method for the job."),
-    body: zod_1.z.string().optional().describe("Request body for POST/PUT/PATCH jobs."),
-    geoCode: zod_1.z.string().optional().describe("Country code."),
-    regionalGeoCode: zod_1.z.string().optional().describe("Regional code."),
-    super_proxy: zod_1.z.boolean().optional().describe("Use residential/mobile proxies."),
-    headers: headerRecordSchema.optional().describe("Headers to send with the upstream request."),
-    forwardHeaders: zod_1.z.boolean().optional().describe("Use only provided headers instead of merging with Scrape.do headers."),
-    sessionId: zod_1.z.union([zod_1.z.number().int(), zod_1.z.string()]).optional().describe("Sticky session ID."),
-    device: zod_1.z.enum(["desktop", "mobile", "tablet"]).optional().describe("Device type."),
-    setCookies: zod_1.z.string().optional().describe("Cookies to include."),
-    timeout: zod_1.z.number().int().positive().optional().describe("Request timeout in milliseconds."),
-    retryTimeout: zod_1.z.number().int().positive().optional().describe("Retry timeout in milliseconds."),
-    disableRetry: zod_1.z.boolean().optional().describe("Disable automatic retries."),
-    transparentResponse: zod_1.z.boolean().optional().describe("Return raw target response."),
-    disableRedirection: zod_1.z.boolean().optional().describe("Disable redirects."),
-    output: zod_1.z.enum(["raw", "markdown"]).optional().describe("Output format."),
-    render: zod_1.z
-        .object({
-        blockResources: zod_1.z.boolean().optional(),
-        waitUntil: asyncWaitUntilSchema.optional(),
-        customWait: zod_1.z.number().int().min(0).max(35000).optional(),
-        waitSelector: zod_1.z.string().optional(),
-        playWithBrowser: zod_1.z.array(browserActionSchema).optional(),
-        returnJSON: zod_1.z.boolean().optional(),
-        showWebsocketRequests: zod_1.z.boolean().optional(),
-        showFrames: zod_1.z.boolean().optional(),
-        screenshot: zod_1.z.boolean().optional(),
-        fullScreenshot: zod_1.z.boolean().optional(),
-        particularScreenshot: zod_1.z.string().optional(),
-    })
-        .optional()
-        .describe("Headless browser configuration."),
-    webhookUrl: zod_1.z.string().url().optional().describe("Webhook URL to receive results."),
-    webhookHeaders: headerRecordSchema.optional().describe("Extra headers for the webhook request."),
+    targets: zod_1.z.array(zod_1.z.string().url()).optional().describe("Alias for Targets."),
+    Targets: zod_1.z.array(zod_1.z.string().url()).optional().describe("Official Async API Targets field."),
+    method: asyncMethodSchema.optional().describe("Alias for Method."),
+    Method: asyncMethodSchema.optional().describe("Official Async API Method field."),
+    body: zod_1.z.string().optional().describe("Alias for Body."),
+    Body: zod_1.z.string().optional().describe("Official Async API Body field."),
+    geoCode: zod_1.z.string().optional().describe("Alias for GeoCode."),
+    GeoCode: zod_1.z.string().optional().describe("Official Async API GeoCode field."),
+    regionalGeoCode: zod_1.z.string().optional().describe("Alias for RegionalGeoCode."),
+    RegionalGeoCode: zod_1.z.string().optional().describe("Official Async API RegionalGeoCode field."),
+    super_proxy: zod_1.z.boolean().optional().describe("Alias for Super."),
+    super: zod_1.z.boolean().optional().describe("Alias for Super."),
+    Super: zod_1.z.boolean().optional().describe("Official Async API Super field."),
+    headers: headerRecordSchema.optional().describe("Alias for Headers."),
+    Headers: headerRecordSchema.optional().describe("Official Async API Headers field."),
+    forwardHeaders: zod_1.z.boolean().optional().describe("Alias for ForwardHeaders."),
+    ForwardHeaders: zod_1.z.boolean().optional().describe("Official Async API ForwardHeaders field."),
+    sessionId: zod_1.z.union([zod_1.z.number().int(), zod_1.z.string()]).optional().describe("Alias for SessionID."),
+    SessionID: zod_1.z.union([zod_1.z.number().int(), zod_1.z.string()]).optional().describe("Official Async API SessionID field."),
+    device: zod_1.z.enum(["desktop", "mobile", "tablet"]).optional().describe("Alias for Device."),
+    Device: zod_1.z.enum(["desktop", "mobile", "tablet"]).optional().describe("Official Async API Device field."),
+    setCookies: zod_1.z.string().optional().describe("Alias for SetCookies."),
+    SetCookies: zod_1.z.string().optional().describe("Official Async API SetCookies field."),
+    timeout: zod_1.z.number().int().positive().optional().describe("Alias for Timeout."),
+    Timeout: zod_1.z.number().int().positive().optional().describe("Official Async API Timeout field."),
+    retryTimeout: zod_1.z.number().int().positive().optional().describe("Alias for RetryTimeout."),
+    RetryTimeout: zod_1.z.number().int().positive().optional().describe("Official Async API RetryTimeout field."),
+    disableRetry: zod_1.z.boolean().optional().describe("Alias for DisableRetry."),
+    DisableRetry: zod_1.z.boolean().optional().describe("Official Async API DisableRetry field."),
+    transparentResponse: zod_1.z.boolean().optional().describe("Alias for TransparentResponse."),
+    TransparentResponse: zod_1.z.boolean().optional().describe("Official Async API TransparentResponse field."),
+    disableRedirection: zod_1.z.boolean().optional().describe("Alias for DisableRedirection."),
+    DisableRedirection: zod_1.z.boolean().optional().describe("Official Async API DisableRedirection field."),
+    output: zod_1.z.enum(["raw", "markdown"]).optional().describe("Alias for Output."),
+    Output: zod_1.z.enum(["raw", "markdown"]).optional().describe("Official Async API Output field."),
+    render: asyncRenderSchema.optional().describe("Alias for Render."),
+    Render: asyncRenderSchema.optional().describe("Official Async API Render field."),
+    webhookUrl: zod_1.z.string().url().optional().describe("Alias for WebhookURL."),
+    WebhookURL: zod_1.z.string().url().optional().describe("Official Async API WebhookURL field."),
+    webhookHeaders: headerRecordSchema.optional().describe("Alias for WebhookHeaders."),
+    WebhookHeaders: headerRecordSchema.optional().describe("Official Async API WebhookHeaders field."),
 }, async (params) => {
     try {
         ensureToken();
-        const render = params.render
-            ? compactObject({
-                BlockResources: params.render.blockResources,
-                WaitUntil: params.render.waitUntil,
-                CustomWait: params.render.customWait,
-                WaitSelector: params.render.waitSelector,
-                PlayWithBrowser: params.render.playWithBrowser,
-                ReturnJSON: params.render.returnJSON,
-                ShowWebsocketRequests: params.render.showWebsocketRequests,
-                ShowFrames: params.render.showFrames,
-                Screenshot: params.render.screenshot,
-                FullScreenshot: params.render.fullScreenshot,
-                ParticularScreenshot: params.render.particularScreenshot,
-            })
-            : undefined;
+        const targets = params.Targets ?? params.targets;
+        if (!targets?.length) {
+            return createErrorResult("Error: targets or Targets is required.");
+        }
+        const render = normalizeAsyncRenderInput(params.Render ?? params.render);
         const body = compactObject({
-            Targets: params.targets,
-            Method: params.method,
-            Body: params.body,
-            GeoCode: params.geoCode,
-            RegionalGeoCode: params.regionalGeoCode,
-            Super: params.super_proxy,
-            Headers: normalizeHeaderRecord(params.headers),
-            ForwardHeaders: params.forwardHeaders,
-            SessionID: params.sessionId !== undefined ? String(params.sessionId) : undefined,
-            Device: params.device,
-            SetCookies: params.setCookies,
-            Timeout: params.timeout,
-            RetryTimeout: params.retryTimeout,
-            DisableRetry: params.disableRetry,
-            TransparentResponse: params.transparentResponse,
-            DisableRedirection: params.disableRedirection,
-            Output: params.output,
+            Targets: targets,
+            Method: params.Method ?? params.method ?? "GET",
+            Body: params.Body ?? params.body,
+            GeoCode: params.GeoCode ?? params.geoCode,
+            RegionalGeoCode: params.RegionalGeoCode ?? params.regionalGeoCode,
+            Super: params.Super ?? params.super ?? params.super_proxy,
+            Headers: normalizeHeaderRecord(params.Headers ?? params.headers),
+            ForwardHeaders: params.ForwardHeaders ?? params.forwardHeaders,
+            SessionID: params.SessionID !== undefined ? String(params.SessionID) : params.sessionId !== undefined ? String(params.sessionId) : undefined,
+            Device: params.Device ?? params.device,
+            SetCookies: params.SetCookies ?? params.setCookies,
+            Timeout: params.Timeout ?? params.timeout,
+            RetryTimeout: params.RetryTimeout ?? params.retryTimeout,
+            DisableRetry: params.DisableRetry ?? params.disableRetry,
+            TransparentResponse: params.TransparentResponse ?? params.transparentResponse,
+            DisableRedirection: params.DisableRedirection ?? params.disableRedirection,
+            Output: params.Output ?? params.output,
             Render: render && Object.keys(render).length > 0 ? render : undefined,
-            WebhookURL: params.webhookUrl,
-            WebhookHeaders: normalizeHeaderRecord(params.webhookHeaders),
+            WebhookURL: params.WebhookURL ?? params.webhookUrl,
+            WebhookHeaders: normalizeHeaderRecord(params.WebhookHeaders ?? params.webhookHeaders),
         });
-        const { text } = await requestText({
+        const response = await requestResponse({
             method: "POST",
             url: `${ASYNC_API_BASE}/api/v1/jobs`,
             headers: {
@@ -651,59 +779,80 @@ server.tool("async_create_job", "Create a Scrape.do Async API job for batch/back
             },
             data: body,
             timeout: 60000,
-        });
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined) {
-            return createJsonResult(parsed);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
         }
-        return createTextResult(text);
+        const parsed = tryParseJson(response.text);
+        if (parsed !== undefined) {
+            return createJsonResult(parsed, { rawText: response.text, response });
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
 });
 server.tool("async_get_job", "Get Scrape.do Async API job details by job ID.", {
-    jobId: zod_1.z.string().min(1).describe("Job ID returned by async_create_job."),
-}, async ({ jobId }) => {
+    jobId: zod_1.z.string().min(1).optional().describe("Alias for jobID."),
+    jobID: zod_1.z.string().min(1).optional().describe("Official Async API jobID path parameter."),
+}, async ({ jobId, jobID }) => {
     try {
         ensureToken();
-        const { text } = await requestText({
+        const resolvedJobId = jobID ?? jobId;
+        if (!resolvedJobId) {
+            return createErrorResult("Error: jobId or jobID is required.");
+        }
+        const response = await requestResponse({
             method: "GET",
-            url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(jobId)}`,
+            url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(resolvedJobId)}`,
             headers: {
                 "X-Token": SCRAPE_DO_TOKEN,
             },
             timeout: 60000,
-        });
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined) {
-            return createJsonResult(parsed);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
         }
-        return createTextResult(text);
+        const parsed = tryParseJson(response.text);
+        if (parsed !== undefined) {
+            return createJsonResult(parsed, { rawText: response.text, response });
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
 });
 server.tool("async_get_task", "Get Scrape.do Async API task details by job ID and task ID.", {
-    jobId: zod_1.z.string().min(1).describe("Job ID."),
-    taskId: zod_1.z.string().min(1).describe("Task ID."),
-}, async ({ jobId, taskId }) => {
+    jobId: zod_1.z.string().min(1).optional().describe("Alias for jobID."),
+    jobID: zod_1.z.string().min(1).optional().describe("Official Async API jobID path parameter."),
+    taskId: zod_1.z.string().min(1).optional().describe("Alias for taskID."),
+    taskID: zod_1.z.string().min(1).optional().describe("Official Async API taskID path parameter."),
+}, async ({ jobId, jobID, taskId, taskID }) => {
     try {
         ensureToken();
-        const { text } = await requestText({
+        const resolvedJobId = jobID ?? jobId;
+        const resolvedTaskId = taskID ?? taskId;
+        if (!resolvedJobId || !resolvedTaskId) {
+            return createErrorResult("Error: jobId/jobID and taskId/taskID are required.");
+        }
+        const response = await requestResponse({
             method: "GET",
-            url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(jobId)}/${encodeURIComponent(taskId)}`,
+            url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(resolvedJobId)}/${encodeURIComponent(resolvedTaskId)}`,
             headers: {
                 "X-Token": SCRAPE_DO_TOKEN,
             },
             timeout: 60000,
-        });
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined) {
-            return createJsonResult(parsed);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
         }
-        return createTextResult(text);
+        const parsed = tryParseJson(response.text);
+        if (parsed !== undefined) {
+            return createJsonResult(parsed, { rawText: response.text, response });
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
@@ -712,49 +861,61 @@ server.tool("async_get_task", "Get Scrape.do Async API task details by job ID an
 server.tool("async_list_jobs", "List Scrape.do Async API jobs with pagination.", {
     page: zod_1.z.number().int().positive().optional().default(1).describe("Page number."),
     pageSize: zod_1.z.number().int().positive().max(100).optional().default(10).describe("Items per page."),
-}, async ({ page, pageSize }) => {
+    page_size: zod_1.z.number().int().positive().max(100).optional().describe("Official Async API page_size query parameter."),
+}, async ({ page, pageSize, page_size }) => {
     try {
         ensureToken();
-        const { text } = await requestText({
+        const response = await requestResponse({
             method: "GET",
             url: `${ASYNC_API_BASE}/api/v1/jobs`,
             params: {
                 page,
-                page_size: pageSize,
+                page_size: page_size ?? pageSize,
             },
             headers: {
                 "X-Token": SCRAPE_DO_TOKEN,
             },
             timeout: 60000,
-        });
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined) {
-            return createJsonResult(parsed);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
         }
-        return createTextResult(text);
+        const parsed = tryParseJson(response.text);
+        if (parsed !== undefined) {
+            return createJsonResult(parsed, { rawText: response.text, response });
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
 });
 server.tool("async_cancel_job", "Cancel a Scrape.do Async API job.", {
-    jobId: zod_1.z.string().min(1).describe("Job ID to cancel."),
-}, async ({ jobId }) => {
+    jobId: zod_1.z.string().min(1).optional().describe("Alias for jobID."),
+    jobID: zod_1.z.string().min(1).optional().describe("Official Async API jobID path parameter."),
+}, async ({ jobId, jobID }) => {
     try {
         ensureToken();
-        const { text } = await requestText({
+        const resolvedJobId = jobID ?? jobId;
+        if (!resolvedJobId) {
+            return createErrorResult("Error: jobId or jobID is required.");
+        }
+        const response = await requestResponse({
             method: "DELETE",
-            url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(jobId)}`,
+            url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(resolvedJobId)}`,
             headers: {
                 "X-Token": SCRAPE_DO_TOKEN,
             },
             timeout: 60000,
-        });
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined) {
-            return createJsonResult(parsed);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
         }
-        return createTextResult(text);
+        const parsed = tryParseJson(response.text);
+        if (parsed !== undefined) {
+            return createJsonResult(parsed, { rawText: response.text, response });
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
@@ -763,19 +924,22 @@ server.tool("async_cancel_job", "Cancel a Scrape.do Async API job.", {
 server.tool("async_get_account", "Get Scrape.do Async API account/concurrency information.", {}, async () => {
     try {
         ensureToken();
-        const { text } = await requestText({
+        const response = await requestResponse({
             method: "GET",
             url: `${ASYNC_API_BASE}/api/v1/me`,
             headers: {
                 "X-Token": SCRAPE_DO_TOKEN,
             },
             timeout: 60000,
-        });
-        const parsed = tryParseJson(text);
-        if (parsed !== undefined) {
-            return createJsonResult(parsed);
+        }, { acceptAnyStatus: true });
+        if (response.statusCode >= 400) {
+            return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
         }
-        return createTextResult(text);
+        const parsed = tryParseJson(response.text);
+        if (parsed !== undefined) {
+            return createJsonResult(parsed, { rawText: response.text, response });
+        }
+        return createTextBodyResult(response.text, response);
     }
     catch (error) {
         return createErrorResult(`Error: ${getErrorMessage(error)}`);
@@ -785,16 +949,17 @@ server.tool("proxy_mode_config", "Generate Scrape.do Proxy Mode configuration an
     params: headerRecordSchema.optional().describe("Proxy mode query parameters to place into the password segment."),
 }, async ({ params }) => {
     try {
-        ensureToken();
         const parameterString = buildProxyParameterString(params);
         return createJsonResult({
             protocol: "http or https",
             host: "proxy.scrape.do",
             port: 8080,
-            username: "<SCRAPE_DO_TOKEN>",
+            username: "<YOUR_SCRAPE_DO_TOKEN>",
             password: parameterString,
-            proxy_url_template: `http://<SCRAPE_DO_TOKEN>:${parameterString}@proxy.scrape.do:8080`,
+            proxy_url_template: `http://<YOUR_SCRAPE_DO_TOKEN>:${parameterString}@proxy.scrape.do:8080`,
             ca_certificate_url: "https://scrape.do/scrapedo_ca.crt",
+            default_customHeaders: true,
+            disable_customHeaders_hint: "Append customHeaders=false to the password parameters if you need to disable the Proxy Mode default.",
         });
     }
     catch (error) {

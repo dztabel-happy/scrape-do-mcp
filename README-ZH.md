@@ -14,8 +14,8 @@
 - `amazon_offer_listing`：Amazon 卖家报价接口。
 - `amazon_search`：Amazon 搜索 / 类目结果接口。
 - `amazon_raw_html`：Amazon 原始 HTML 接口。
-- `async_create_job`、`async_get_job`、`async_get_task`、`async_list_jobs`、`async_cancel_job`、`async_get_account`：Async API。
-- `proxy_mode_config`：生成 Proxy Mode 的连接信息和参数字符串，不会在工具输出里泄露你的 token。
+- `async_create_job`、`async_get_job`、`async_get_task`、`async_list_jobs`、`async_cancel_job`、`async_get_account`：Async API，并同时兼容 MCP 风格字段和官方字段名。
+- `proxy_mode_config`：生成更贴近官方文档的 Proxy Mode 连接信息、默认参数串和证书信息。
 
 ## 兼容性说明
 
@@ -29,9 +29,13 @@
   - `language` 或 `hl`
   - `domain` 或 `google_domain`
   - `includeHtml` 或 `include_html`
+- `async_create_job` 同时接受 `targets`、`render`、`webhookUrl` 这类别名，以及官方字段 `Targets`、`Render`、`WebhookURL`。
+- `async_get_job`、`async_get_task`、`async_cancel_job` 同时接受 `jobId` / `taskId` 和官方 `jobID` / `taskID`。
+- `async_list_jobs` 同时支持 `pageSize` 和官方 `page_size`。
 - `scrape_url` 里的 Header 转发请使用 `headers` + `header_mode`（`custom` / `extra` / `forward`）。
-- 截图结果会以 MCP 图片内容返回，而不是单纯的 base64 文本。
-- `scrape_url` 在未启用 ReturnJSON 时默认使用 `output="markdown"`，更适合 LLM 读取；如果你想更贴近原始 HTTP API 的行为，请手动设置 `output="raw"`。
+- 截图结果会保留官方 JSON 响应，同时附加 MCP 图片内容，尽量兼顾官方格式和 MCP 可视化体验。
+- `scrape_url` 现在默认使用 `output="raw"`，更贴近官方 API。
+- `scrape_url` 会在 `structuredContent` 里附带响应元数据，便于在 MCP 中查看 `pureCookies`、`transparentResponse` 和二进制响应信息。
 
 ## 安装
 

@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const SERVER_VERSION = "0.3.0";
+const SERVER_VERSION = "0.4.0";
 const SCRAPE_DO_TOKEN = process.env.SCRAPE_DO_TOKEN || "";
 const SCRAPE_API_BASE = "https://api.scrape.do";
 const ASYNC_API_BASE = "https://q.scrape.do";
@@ -25,6 +25,14 @@ type HeaderMode = z.infer<typeof headerModeSchema>;
 type ImageMatch = {
   data: string;
   mimeType: string;
+};
+type ResponseHeaders = Record<string, string | string[] | undefined>;
+type ScrapeDoResponse = {
+  contentType?: string;
+  data: Buffer;
+  headers: ResponseHeaders;
+  statusCode: number;
+  text: string;
 };
 
 const server = new McpServer({
@@ -86,21 +94,33 @@ function createTextResult(text: string, structuredContent?: Record<string, unkno
   };
 }
 
-function createJsonResult(value: unknown) {
+function createJsonResult(value: unknown, options?: { rawText?: string; response?: ScrapeDoResponse }) {
+  const rawText = options?.rawText ?? JSON.stringify(value, null, 2);
+  const responseMetadata = options?.response ? createResponseMetadata(options.response) : undefined;
+
   if (isRecord(value)) {
     return {
-      content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
-      structuredContent: value,
+      content: [{ type: "text" as const, text: rawText }],
+      structuredContent: responseMetadata ? { ...value, ...responseMetadata } : value,
     };
   }
 
-  return createTextResult(JSON.stringify(value, null, 2));
+  if (Array.isArray(value) && responseMetadata) {
+    return createTextResult(rawText, {
+      ...responseMetadata,
+      _responseBody: value,
+    });
+  }
+
+  return createTextResult(rawText);
 }
 
-function createImageResult(images: ImageMatch[], note?: string) {
+function createImageResult(images: ImageMatch[], note?: string, structuredContent?: Record<string, unknown>, rawText?: string) {
   const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
 
-  if (note) {
+  if (rawText) {
+    content.push({ type: "text", text: rawText });
+  } else if (note) {
     content.push({ type: "text", text: note });
   }
 
@@ -112,7 +132,10 @@ function createImageResult(images: ImageMatch[], note?: string) {
     });
   }
 
-  return { content };
+  return {
+    content,
+    ...(structuredContent ? { structuredContent } : {}),
+  };
 }
 
 function getErrorMessage(error: unknown): string {
@@ -133,16 +156,82 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-async function requestText(config: AxiosRequestConfig): Promise<{ text: string; headers: Record<string, string | string[] | undefined> }> {
-  const response = await axios.request<unknown>({
-    ...config,
-    responseType: "text",
-    transformResponse: [(value) => value],
+function getMimeType(contentType?: string): string | undefined {
+  return contentType?.split(";")[0]?.trim().toLowerCase();
+}
+
+function isTextLikeMimeType(mimeType?: string): boolean {
+  if (!mimeType) {
+    return true;
+  }
+
+  return mimeType.startsWith("text/") || mimeType.includes("json") || mimeType.includes("xml") || mimeType === "application/javascript" || mimeType === "application/x-javascript" || mimeType === "application/xhtml+xml";
+}
+
+function normalizeResponseHeaders(headers: ResponseHeaders): Record<string, string | string[]> | undefined {
+  const entries = Object.entries(headers).filter(([, value]) => value !== undefined);
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries.map(([key, value]) => [key, Array.isArray(value) && value.length === 1 ? value[0] : value as string | string[]]));
+}
+
+function createResponseMetadata(response: ScrapeDoResponse): Record<string, unknown> {
+  return compactObject({
+    _contentType: response.contentType,
+    _responseHeaders: normalizeResponseHeaders(response.headers),
+    _statusCode: response.statusCode,
   });
+}
+
+function createBinaryResult(response: ScrapeDoResponse) {
+  const mimeType = getMimeType(response.contentType) ?? "application/octet-stream";
+
+  if (mimeType.startsWith("image/")) {
+    return {
+      content: [
+        { type: "image" as const, data: response.data.toString("base64"), mimeType },
+      ],
+      structuredContent: createResponseMetadata(response),
+    };
+  }
+
+  return createTextResult(
+    `Binary response returned with content-type ${mimeType}. See structuredContent._bodyBase64 for the raw bytes.`,
+    {
+      ...createResponseMetadata(response),
+      _bodyBase64: response.data.toString("base64"),
+    },
+  );
+}
+
+function createTextBodyResult(text: string, response?: ScrapeDoResponse) {
+  if (!response) {
+    return createTextResult(text);
+  }
+
+  return createTextResult(text, createResponseMetadata(response));
+}
+
+async function requestResponse(config: AxiosRequestConfig, options?: { acceptAnyStatus?: boolean }): Promise<ScrapeDoResponse> {
+  const response = await axios.request<ArrayBuffer>({
+    ...config,
+    responseType: "arraybuffer",
+    transformResponse: [(value) => value],
+    validateStatus: options?.acceptAnyStatus ? () => true : undefined,
+  });
+  const data = Buffer.isBuffer(response.data) ? response.data : Buffer.from(response.data);
+  const headers = response.headers as ResponseHeaders;
+  const contentTypeHeader = headers["content-type"];
+  const contentType = Array.isArray(contentTypeHeader) ? contentTypeHeader[0] : contentTypeHeader;
 
   return {
-    text: stringifyUnknown(response.data),
-    headers: response.headers as Record<string, string | string[] | undefined>,
+    contentType,
+    data,
+    headers,
+    statusCode: response.status,
+    text: data.toString("utf8"),
   };
 }
 
@@ -284,7 +373,7 @@ function collectImageMatches(value: unknown, results: ImageMatch[] = [], seen = 
     return results;
   }
 
-  const prioritizedKeys = ["screenShot", "screenshot", "fullScreenShot", "particularScreenShot", "image", "images"];
+  const prioritizedKeys = ["screenShot", "screenShots", "screenshot", "fullScreenShot", "particularScreenShot", "image", "images"];
 
   for (const key of prioritizedKeys) {
     if (key in value) {
@@ -314,6 +403,53 @@ function buildProxyParameterString(params?: HeaderRecord): string {
   return searchParams.toString();
 }
 
+const asyncRenderSchema = z.object({
+  blockResources: z.boolean().optional(),
+  BlockResources: z.boolean().optional(),
+  waitUntil: asyncWaitUntilSchema.optional(),
+  WaitUntil: asyncWaitUntilSchema.optional(),
+  customWait: z.number().int().min(0).max(35000).optional(),
+  CustomWait: z.number().int().min(0).max(35000).optional(),
+  waitSelector: z.string().optional(),
+  WaitSelector: z.string().optional(),
+  playWithBrowser: z.array(browserActionSchema).optional(),
+  PlayWithBrowser: z.array(browserActionSchema).optional(),
+  returnJSON: z.boolean().optional(),
+  ReturnJSON: z.boolean().optional(),
+  showWebsocketRequests: z.boolean().optional(),
+  ShowWebsocketRequests: z.boolean().optional(),
+  showFrames: z.boolean().optional(),
+  ShowFrames: z.boolean().optional(),
+  screenshot: z.boolean().optional(),
+  Screenshot: z.boolean().optional(),
+  fullScreenshot: z.boolean().optional(),
+  FullScreenshot: z.boolean().optional(),
+  particularScreenshot: z.string().optional(),
+  ParticularScreenshot: z.string().optional(),
+});
+
+type AsyncRenderInput = z.infer<typeof asyncRenderSchema>;
+
+function normalizeAsyncRenderInput(input?: AsyncRenderInput): Record<string, unknown> | undefined {
+  if (!input) {
+    return undefined;
+  }
+
+  return compactObject({
+    BlockResources: input.BlockResources ?? input.blockResources,
+    WaitUntil: input.WaitUntil ?? input.waitUntil,
+    CustomWait: input.CustomWait ?? input.customWait,
+    WaitSelector: input.WaitSelector ?? input.waitSelector,
+    PlayWithBrowser: input.PlayWithBrowser ?? input.playWithBrowser,
+    ReturnJSON: input.ReturnJSON ?? input.returnJSON,
+    ShowWebsocketRequests: input.ShowWebsocketRequests ?? input.showWebsocketRequests,
+    ShowFrames: input.ShowFrames ?? input.showFrames,
+    Screenshot: input.Screenshot ?? input.screenshot,
+    FullScreenshot: input.FullScreenshot ?? input.fullScreenshot,
+    ParticularScreenshot: input.ParticularScreenshot ?? input.particularScreenshot,
+  });
+}
+
 function ensureToken() {
   if (!SCRAPE_DO_TOKEN) {
     throw new Error("SCRAPE_DO_TOKEN is not set. Get your token at https://app.scrape.do");
@@ -336,7 +472,7 @@ server.tool(
     timeout: z.number().int().positive().optional().default(60000).describe("Maximum timeout in milliseconds."),
     retryTimeout: z.number().int().positive().optional().describe("Retry timeout in milliseconds."),
     disableRetry: z.boolean().optional().default(false).describe("Disable automatic retries."),
-    output: z.enum(["markdown", "raw"]).optional().describe("Output format. MCP defaults to markdown unless ReturnJSON is used."),
+    output: z.enum(["markdown", "raw"]).optional().describe("Output format. Matches Scrape.do's official raw/markdown output."),
     returnJSON: z.boolean().optional().default(false).describe("Return JSON with network requests/content."),
     transparentResponse: z.boolean().optional().default(false).describe("Return the target response without Scrape.do post-processing."),
     screenshot: z.boolean().optional().describe("Alias for screenShot. Capture a viewport screenshot."),
@@ -383,7 +519,7 @@ server.tool(
       const effectiveRender = (params.render_js ?? params.render ?? false) || params.returnJSON || params.showFrames || params.showWebsocketRequests || screenshotRequested || interactionRequested;
       const effectiveReturnJSON = params.returnJSON || params.showFrames || params.showWebsocketRequests || screenshotRequested || interactionRequested;
       const effectiveBlockResources = screenshotRequested || interactionRequested ? false : params.blockResources;
-      const effectiveOutput = effectiveReturnJSON ? params.output : params.output ?? "markdown";
+      const effectiveOutput = effectiveReturnJSON ? params.output : params.output ?? "raw";
 
       const requestParams = compactObject({
         token: SCRAPE_DO_TOKEN,
@@ -422,27 +558,38 @@ server.tool(
       });
 
       const headers = buildForwardedHeaders(params.headers, headerMode);
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "GET",
         url: SCRAPE_API_BASE,
         params: requestParams,
         headers,
         timeout: Math.min(params.timeout ?? 60000, 120000),
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      const images = screenshotRequested || interactionRequested ? collectImageMatches(parsed ?? text) : [];
+      if (response.statusCode >= 400 && !params.transparentResponse) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
+      }
+
+      const responseMimeType = getMimeType(response.contentType);
+      const parsed = isTextLikeMimeType(responseMimeType) ? tryParseJson(response.text) : undefined;
+      const images = screenshotRequested || interactionRequested ? collectImageMatches(parsed ?? response.text) : [];
 
       if (images.length > 0) {
-        const note = images.length === 1 ? "Captured screenshot from Scrape.do." : `Captured ${images.length} screenshots from Scrape.do.`;
-        return createImageResult(images, note);
+        const structuredContent = parsed && isRecord(parsed)
+          ? { ...parsed, ...createResponseMetadata(response) }
+          : createResponseMetadata(response);
+        return createImageResult(images, undefined, structuredContent, parsed ? response.text : undefined);
       }
 
       if (parsed !== undefined) {
-        return createJsonResult(parsed);
+        return createJsonResult(parsed, { rawText: response.text, response });
       }
 
-      return createTextResult(text);
+      if (isTextLikeMimeType(responseMimeType)) {
+        return createTextBodyResult(response.text, response);
+      }
+
+      return createBinaryResult(response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -506,19 +653,23 @@ server.tool(
         filter: params.filter,
       });
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "GET",
         url: `${SCRAPE_API_BASE}/plugin/google/search`,
         params: requestParams,
         timeout: 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      if (parsed !== undefined) {
-        return createJsonResult(parsed);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
       }
 
-      return createTextResult(text);
+      const parsed = tryParseJson(response.text);
+      if (parsed !== undefined) {
+        return createJsonResult(parsed, { rawText: response.text, response });
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -552,19 +703,23 @@ server.tool(
         include_html: params.include_html ?? params.includeHtml ? true : undefined,
       });
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "GET",
         url: `${SCRAPE_API_BASE}/plugin/amazon/pdp`,
         params: requestParams,
         timeout: 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      if (parsed !== undefined) {
-        return createJsonResult(parsed);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
       }
 
-      return createTextResult(text);
+      const parsed = tryParseJson(response.text);
+      if (parsed !== undefined) {
+        return createJsonResult(parsed, { rawText: response.text, response });
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -596,19 +751,23 @@ server.tool(
         include_html: params.include_html ?? params.includeHtml ? true : undefined,
       });
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "GET",
         url: `${SCRAPE_API_BASE}/plugin/amazon/offer-listing`,
         params: requestParams,
         timeout: 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      if (parsed !== undefined) {
-        return createJsonResult(parsed);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
       }
 
-      return createTextResult(text);
+      const parsed = tryParseJson(response.text);
+      if (parsed !== undefined) {
+        return createJsonResult(parsed, { rawText: response.text, response });
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -644,19 +803,23 @@ server.tool(
         include_html: params.include_html ?? params.includeHtml ? true : undefined,
       });
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "GET",
         url: `${SCRAPE_API_BASE}/plugin/amazon/search`,
         params: requestParams,
         timeout: 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      if (parsed !== undefined) {
-        return createJsonResult(parsed);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
       }
 
-      return createTextResult(text);
+      const parsed = tryParseJson(response.text);
+      if (parsed !== undefined) {
+        return createJsonResult(parsed, { rawText: response.text, response });
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -690,14 +853,18 @@ server.tool(
         timeout: params.timeout,
       });
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "GET",
         url: `${SCRAPE_API_BASE}/plugin/amazon/`,
         params: requestParams,
         timeout: params.timeout ?? 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      return createTextResult(text);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -708,86 +875,83 @@ server.tool(
   "async_create_job",
   "Create a Scrape.do Async API job for batch/background scraping.",
   {
-    targets: z.array(z.string().url()).min(1).describe("URLs to scrape."),
-    method: asyncMethodSchema.optional().default("GET").describe("HTTP method for the job."),
-    body: z.string().optional().describe("Request body for POST/PUT/PATCH jobs."),
-    geoCode: z.string().optional().describe("Country code."),
-    regionalGeoCode: z.string().optional().describe("Regional code."),
-    super_proxy: z.boolean().optional().describe("Use residential/mobile proxies."),
-    headers: headerRecordSchema.optional().describe("Headers to send with the upstream request."),
-    forwardHeaders: z.boolean().optional().describe("Use only provided headers instead of merging with Scrape.do headers."),
-    sessionId: z.union([z.number().int(), z.string()]).optional().describe("Sticky session ID."),
-    device: z.enum(["desktop", "mobile", "tablet"]).optional().describe("Device type."),
-    setCookies: z.string().optional().describe("Cookies to include."),
-    timeout: z.number().int().positive().optional().describe("Request timeout in milliseconds."),
-    retryTimeout: z.number().int().positive().optional().describe("Retry timeout in milliseconds."),
-    disableRetry: z.boolean().optional().describe("Disable automatic retries."),
-    transparentResponse: z.boolean().optional().describe("Return raw target response."),
-    disableRedirection: z.boolean().optional().describe("Disable redirects."),
-    output: z.enum(["raw", "markdown"]).optional().describe("Output format."),
-    render: z
-      .object({
-        blockResources: z.boolean().optional(),
-        waitUntil: asyncWaitUntilSchema.optional(),
-        customWait: z.number().int().min(0).max(35000).optional(),
-        waitSelector: z.string().optional(),
-        playWithBrowser: z.array(browserActionSchema).optional(),
-        returnJSON: z.boolean().optional(),
-        showWebsocketRequests: z.boolean().optional(),
-        showFrames: z.boolean().optional(),
-        screenshot: z.boolean().optional(),
-        fullScreenshot: z.boolean().optional(),
-        particularScreenshot: z.string().optional(),
-      })
-      .optional()
-      .describe("Headless browser configuration."),
-    webhookUrl: z.string().url().optional().describe("Webhook URL to receive results."),
-    webhookHeaders: headerRecordSchema.optional().describe("Extra headers for the webhook request."),
+    targets: z.array(z.string().url()).optional().describe("Alias for Targets."),
+    Targets: z.array(z.string().url()).optional().describe("Official Async API Targets field."),
+    method: asyncMethodSchema.optional().describe("Alias for Method."),
+    Method: asyncMethodSchema.optional().describe("Official Async API Method field."),
+    body: z.string().optional().describe("Alias for Body."),
+    Body: z.string().optional().describe("Official Async API Body field."),
+    geoCode: z.string().optional().describe("Alias for GeoCode."),
+    GeoCode: z.string().optional().describe("Official Async API GeoCode field."),
+    regionalGeoCode: z.string().optional().describe("Alias for RegionalGeoCode."),
+    RegionalGeoCode: z.string().optional().describe("Official Async API RegionalGeoCode field."),
+    super_proxy: z.boolean().optional().describe("Alias for Super."),
+    super: z.boolean().optional().describe("Alias for Super."),
+    Super: z.boolean().optional().describe("Official Async API Super field."),
+    headers: headerRecordSchema.optional().describe("Alias for Headers."),
+    Headers: headerRecordSchema.optional().describe("Official Async API Headers field."),
+    forwardHeaders: z.boolean().optional().describe("Alias for ForwardHeaders."),
+    ForwardHeaders: z.boolean().optional().describe("Official Async API ForwardHeaders field."),
+    sessionId: z.union([z.number().int(), z.string()]).optional().describe("Alias for SessionID."),
+    SessionID: z.union([z.number().int(), z.string()]).optional().describe("Official Async API SessionID field."),
+    device: z.enum(["desktop", "mobile", "tablet"]).optional().describe("Alias for Device."),
+    Device: z.enum(["desktop", "mobile", "tablet"]).optional().describe("Official Async API Device field."),
+    setCookies: z.string().optional().describe("Alias for SetCookies."),
+    SetCookies: z.string().optional().describe("Official Async API SetCookies field."),
+    timeout: z.number().int().positive().optional().describe("Alias for Timeout."),
+    Timeout: z.number().int().positive().optional().describe("Official Async API Timeout field."),
+    retryTimeout: z.number().int().positive().optional().describe("Alias for RetryTimeout."),
+    RetryTimeout: z.number().int().positive().optional().describe("Official Async API RetryTimeout field."),
+    disableRetry: z.boolean().optional().describe("Alias for DisableRetry."),
+    DisableRetry: z.boolean().optional().describe("Official Async API DisableRetry field."),
+    transparentResponse: z.boolean().optional().describe("Alias for TransparentResponse."),
+    TransparentResponse: z.boolean().optional().describe("Official Async API TransparentResponse field."),
+    disableRedirection: z.boolean().optional().describe("Alias for DisableRedirection."),
+    DisableRedirection: z.boolean().optional().describe("Official Async API DisableRedirection field."),
+    output: z.enum(["raw", "markdown"]).optional().describe("Alias for Output."),
+    Output: z.enum(["raw", "markdown"]).optional().describe("Official Async API Output field."),
+    render: asyncRenderSchema.optional().describe("Alias for Render."),
+    Render: asyncRenderSchema.optional().describe("Official Async API Render field."),
+    webhookUrl: z.string().url().optional().describe("Alias for WebhookURL."),
+    WebhookURL: z.string().url().optional().describe("Official Async API WebhookURL field."),
+    webhookHeaders: headerRecordSchema.optional().describe("Alias for WebhookHeaders."),
+    WebhookHeaders: headerRecordSchema.optional().describe("Official Async API WebhookHeaders field."),
   },
   async (params) => {
     try {
       ensureToken();
 
-      const render = params.render
-        ? compactObject({
-            BlockResources: params.render.blockResources,
-            WaitUntil: params.render.waitUntil,
-            CustomWait: params.render.customWait,
-            WaitSelector: params.render.waitSelector,
-            PlayWithBrowser: params.render.playWithBrowser,
-            ReturnJSON: params.render.returnJSON,
-            ShowWebsocketRequests: params.render.showWebsocketRequests,
-            ShowFrames: params.render.showFrames,
-            Screenshot: params.render.screenshot,
-            FullScreenshot: params.render.fullScreenshot,
-            ParticularScreenshot: params.render.particularScreenshot,
-          })
-        : undefined;
+      const targets = params.Targets ?? params.targets;
+      if (!targets?.length) {
+        return createErrorResult("Error: targets or Targets is required.");
+      }
+
+      const render = normalizeAsyncRenderInput(params.Render ?? params.render);
 
       const body = compactObject({
-        Targets: params.targets,
-        Method: params.method,
-        Body: params.body,
-        GeoCode: params.geoCode,
-        RegionalGeoCode: params.regionalGeoCode,
-        Super: params.super_proxy,
-        Headers: normalizeHeaderRecord(params.headers),
-        ForwardHeaders: params.forwardHeaders,
-        SessionID: params.sessionId !== undefined ? String(params.sessionId) : undefined,
-        Device: params.device,
-        SetCookies: params.setCookies,
-        Timeout: params.timeout,
-        RetryTimeout: params.retryTimeout,
-        DisableRetry: params.disableRetry,
-        TransparentResponse: params.transparentResponse,
-        DisableRedirection: params.disableRedirection,
-        Output: params.output,
+        Targets: targets,
+        Method: params.Method ?? params.method ?? "GET",
+        Body: params.Body ?? params.body,
+        GeoCode: params.GeoCode ?? params.geoCode,
+        RegionalGeoCode: params.RegionalGeoCode ?? params.regionalGeoCode,
+        Super: params.Super ?? params.super ?? params.super_proxy,
+        Headers: normalizeHeaderRecord(params.Headers ?? params.headers),
+        ForwardHeaders: params.ForwardHeaders ?? params.forwardHeaders,
+        SessionID: params.SessionID !== undefined ? String(params.SessionID) : params.sessionId !== undefined ? String(params.sessionId) : undefined,
+        Device: params.Device ?? params.device,
+        SetCookies: params.SetCookies ?? params.setCookies,
+        Timeout: params.Timeout ?? params.timeout,
+        RetryTimeout: params.RetryTimeout ?? params.retryTimeout,
+        DisableRetry: params.DisableRetry ?? params.disableRetry,
+        TransparentResponse: params.TransparentResponse ?? params.transparentResponse,
+        DisableRedirection: params.DisableRedirection ?? params.disableRedirection,
+        Output: params.Output ?? params.output,
         Render: render && Object.keys(render).length > 0 ? render : undefined,
-        WebhookURL: params.webhookUrl,
-        WebhookHeaders: normalizeHeaderRecord(params.webhookHeaders),
+        WebhookURL: params.WebhookURL ?? params.webhookUrl,
+        WebhookHeaders: normalizeHeaderRecord(params.WebhookHeaders ?? params.webhookHeaders),
       });
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "POST",
         url: `${ASYNC_API_BASE}/api/v1/jobs`,
         headers: {
@@ -796,14 +960,18 @@ server.tool(
         },
         data: body,
         timeout: 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      if (parsed !== undefined) {
-        return createJsonResult(parsed);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
       }
 
-      return createTextResult(text);
+      const parsed = tryParseJson(response.text);
+      if (parsed !== undefined) {
+        return createJsonResult(parsed, { rawText: response.text, response });
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -814,27 +982,36 @@ server.tool(
   "async_get_job",
   "Get Scrape.do Async API job details by job ID.",
   {
-    jobId: z.string().min(1).describe("Job ID returned by async_create_job."),
+    jobId: z.string().min(1).optional().describe("Alias for jobID."),
+    jobID: z.string().min(1).optional().describe("Official Async API jobID path parameter."),
   },
-  async ({ jobId }) => {
+  async ({ jobId, jobID }) => {
     try {
       ensureToken();
+      const resolvedJobId = jobID ?? jobId;
+      if (!resolvedJobId) {
+        return createErrorResult("Error: jobId or jobID is required.");
+      }
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "GET",
-        url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(jobId)}`,
+        url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(resolvedJobId)}`,
         headers: {
           "X-Token": SCRAPE_DO_TOKEN,
         },
         timeout: 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      if (parsed !== undefined) {
-        return createJsonResult(parsed);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
       }
 
-      return createTextResult(text);
+      const parsed = tryParseJson(response.text);
+      if (parsed !== undefined) {
+        return createJsonResult(parsed, { rawText: response.text, response });
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -845,28 +1022,39 @@ server.tool(
   "async_get_task",
   "Get Scrape.do Async API task details by job ID and task ID.",
   {
-    jobId: z.string().min(1).describe("Job ID."),
-    taskId: z.string().min(1).describe("Task ID."),
+    jobId: z.string().min(1).optional().describe("Alias for jobID."),
+    jobID: z.string().min(1).optional().describe("Official Async API jobID path parameter."),
+    taskId: z.string().min(1).optional().describe("Alias for taskID."),
+    taskID: z.string().min(1).optional().describe("Official Async API taskID path parameter."),
   },
-  async ({ jobId, taskId }) => {
+  async ({ jobId, jobID, taskId, taskID }) => {
     try {
       ensureToken();
+      const resolvedJobId = jobID ?? jobId;
+      const resolvedTaskId = taskID ?? taskId;
+      if (!resolvedJobId || !resolvedTaskId) {
+        return createErrorResult("Error: jobId/jobID and taskId/taskID are required.");
+      }
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "GET",
-        url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(jobId)}/${encodeURIComponent(taskId)}`,
+        url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(resolvedJobId)}/${encodeURIComponent(resolvedTaskId)}`,
         headers: {
           "X-Token": SCRAPE_DO_TOKEN,
         },
         timeout: 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      if (parsed !== undefined) {
-        return createJsonResult(parsed);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
       }
 
-      return createTextResult(text);
+      const parsed = tryParseJson(response.text);
+      if (parsed !== undefined) {
+        return createJsonResult(parsed, { rawText: response.text, response });
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -879,30 +1067,35 @@ server.tool(
   {
     page: z.number().int().positive().optional().default(1).describe("Page number."),
     pageSize: z.number().int().positive().max(100).optional().default(10).describe("Items per page."),
+    page_size: z.number().int().positive().max(100).optional().describe("Official Async API page_size query parameter."),
   },
-  async ({ page, pageSize }) => {
+  async ({ page, pageSize, page_size }) => {
     try {
       ensureToken();
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "GET",
         url: `${ASYNC_API_BASE}/api/v1/jobs`,
         params: {
           page,
-          page_size: pageSize,
+          page_size: page_size ?? pageSize,
         },
         headers: {
           "X-Token": SCRAPE_DO_TOKEN,
         },
         timeout: 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      if (parsed !== undefined) {
-        return createJsonResult(parsed);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
       }
 
-      return createTextResult(text);
+      const parsed = tryParseJson(response.text);
+      if (parsed !== undefined) {
+        return createJsonResult(parsed, { rawText: response.text, response });
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -913,27 +1106,36 @@ server.tool(
   "async_cancel_job",
   "Cancel a Scrape.do Async API job.",
   {
-    jobId: z.string().min(1).describe("Job ID to cancel."),
+    jobId: z.string().min(1).optional().describe("Alias for jobID."),
+    jobID: z.string().min(1).optional().describe("Official Async API jobID path parameter."),
   },
-  async ({ jobId }) => {
+  async ({ jobId, jobID }) => {
     try {
       ensureToken();
+      const resolvedJobId = jobID ?? jobId;
+      if (!resolvedJobId) {
+        return createErrorResult("Error: jobId or jobID is required.");
+      }
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "DELETE",
-        url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(jobId)}`,
+        url: `${ASYNC_API_BASE}/api/v1/jobs/${encodeURIComponent(resolvedJobId)}`,
         headers: {
           "X-Token": SCRAPE_DO_TOKEN,
         },
         timeout: 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      if (parsed !== undefined) {
-        return createJsonResult(parsed);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
       }
 
-      return createTextResult(text);
+      const parsed = tryParseJson(response.text);
+      if (parsed !== undefined) {
+        return createJsonResult(parsed, { rawText: response.text, response });
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -948,21 +1150,25 @@ server.tool(
     try {
       ensureToken();
 
-      const { text } = await requestText({
+      const response = await requestResponse({
         method: "GET",
         url: `${ASYNC_API_BASE}/api/v1/me`,
         headers: {
           "X-Token": SCRAPE_DO_TOKEN,
         },
         timeout: 60000,
-      });
+      }, { acceptAnyStatus: true });
 
-      const parsed = tryParseJson(text);
-      if (parsed !== undefined) {
-        return createJsonResult(parsed);
+      if (response.statusCode >= 400) {
+        return createErrorResult(`Error (${response.statusCode}): ${response.text}`);
       }
 
-      return createTextResult(text);
+      const parsed = tryParseJson(response.text);
+      if (parsed !== undefined) {
+        return createJsonResult(parsed, { rawText: response.text, response });
+      }
+
+      return createTextBodyResult(response.text, response);
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);
     }
@@ -977,17 +1183,17 @@ server.tool(
   },
   async ({ params }) => {
     try {
-      ensureToken();
-
       const parameterString = buildProxyParameterString(params);
       return createJsonResult({
         protocol: "http or https",
         host: "proxy.scrape.do",
         port: 8080,
-        username: "<SCRAPE_DO_TOKEN>",
+        username: "<YOUR_SCRAPE_DO_TOKEN>",
         password: parameterString,
-        proxy_url_template: `http://<SCRAPE_DO_TOKEN>:${parameterString}@proxy.scrape.do:8080`,
+        proxy_url_template: `http://<YOUR_SCRAPE_DO_TOKEN>:${parameterString}@proxy.scrape.do:8080`,
         ca_certificate_url: "https://scrape.do/scrapedo_ca.crt",
+        default_customHeaders: true,
+        disable_customHeaders_hint: "Append customHeaders=false to the password parameters if you need to disable the Proxy Mode default.",
       });
     } catch (error) {
       return createErrorResult(`Error: ${getErrorMessage(error)}`);

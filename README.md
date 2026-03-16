@@ -14,8 +14,8 @@ Official docs: https://scrape.do/documentation/
 - `amazon_offer_listing`: Amazon offer listing endpoint.
 - `amazon_search`: Amazon search/category endpoint.
 - `amazon_raw_html`: Raw HTML Amazon endpoint with geo-targeting.
-- `async_create_job`, `async_get_job`, `async_get_task`, `async_list_jobs`, `async_cancel_job`, `async_get_account`: Async API coverage.
-- `proxy_mode_config`: Builds Proxy Mode connection details and parameter strings without exposing your token in tool output.
+- `async_create_job`, `async_get_job`, `async_get_task`, `async_list_jobs`, `async_cancel_job`, `async_get_account`: Async API coverage with both MCP-friendly aliases and official field names.
+- `proxy_mode_config`: Builds official Proxy Mode connection details, default parameter strings, and CA certificate references.
 
 ## Compatibility Notes
 
@@ -29,9 +29,13 @@ Official docs: https://scrape.do/documentation/
   - `language` or `hl`
   - `domain` or `google_domain`
   - `includeHtml` or `include_html`
+- `async_create_job` accepts both alias fields like `targets`, `render`, `webhookUrl` and official Async API fields like `Targets`, `Render`, `WebhookURL`.
+- `async_get_job`, `async_get_task`, and `async_cancel_job` accept both `jobId`/`taskId` and official `jobID`/`taskID`.
+- `async_list_jobs` accepts both `pageSize` and official `page_size`.
 - For header forwarding in `scrape_url`, pass `headers` plus `header_mode` (`custom`, `extra`, or `forward`).
-- Screenshot responses are returned as MCP image content instead of plain base64 text.
-- `scrape_url` defaults to `output="markdown"` when ReturnJSON is not used so the tool stays LLM-friendly. Set `output="raw"` if you want the raw API-style output.
+- Screenshot responses preserve the official Scrape.do JSON body and also attach MCP image content when screenshots are present.
+- `scrape_url` now defaults to `output="raw"` to match the official API more closely.
+- `scrape_url` includes response metadata in `structuredContent`, which helps surface `pureCookies`, `transparentResponse`, and binary responses inside MCP.
 
 ## Installation
 
