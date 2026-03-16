@@ -1,5 +1,7 @@
 # scrape-do-mcp
 
+[English Docs](./README.md) | 中文文档
+
 Scrape.do 网页抓取和 Google 搜索 MCP 服务器 - 支持反机器人保护
 
 ## 功能特点

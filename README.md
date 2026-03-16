@@ -1,5 +1,7 @@
 # scrape-do-mcp
 
+[中文文档](./README-ZH.md) | English
+
 MCP Server for Scrape.do - Web Scraping & Google Search with anti-bot bypass
 
 ## Features
